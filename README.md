@@ -44,4 +44,4 @@ This project is open-source under the **MIT License**.
 ---
 
 ### Contact
-For any queries, contact **[Your Name]** at **your.email@example.com**.
+For any queries, contact **[Rounak Sondawale]** at **rounaksondawale@gmail.com**.
