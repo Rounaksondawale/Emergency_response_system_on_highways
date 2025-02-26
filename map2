@@ -1,0 +1,401 @@
+package com.example.map2;
+
+import static android.Manifest.permission.ACCESS_COARSE_LOCATION;
+import static android.Manifest.permission.ACCESS_FINE_LOCATION;
+
+import android.annotation.SuppressLint;
+import android.content.Context;
+import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.location.Location;
+import android.location.LocationManager;
+import android.os.Bundle;
+import android.provider.Settings;
+import android.util.Log;
+import android.widget.Button;
+import android.widget.SearchView;
+import android.widget.Toast;
+
+import androidx.annotation.NonNull;
+import androidx.appcompat.app.AlertDialog;
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.app.ActivityCompat;
+import com.android.volley.Request;
+import com.android.volley.RequestQueue;
+import com.android.volley.toolbox.JsonObjectRequest;
+import com.android.volley.toolbox.Volley;
+import org.json.JSONException;
+import org.json.JSONObject;
+import java.util.HashMap;
+import java.util.Map;
+import com.google.android.gms.location.FusedLocationProviderClient;
+import com.google.android.gms.location.LocationCallback;
+import com.google.android.gms.location.LocationRequest;
+import com.google.android.gms.location.LocationResult;
+import com.google.android.gms.location.LocationServices;
+import com.google.android.gms.maps.CameraUpdateFactory;
+import com.google.android.gms.maps.GoogleMap;
+import com.google.android.gms.maps.OnMapReadyCallback;
+import com.google.android.gms.maps.SupportMapFragment;
+import com.google.android.gms.maps.model.LatLng;
+import com.google.android.gms.maps.model.Marker;
+import com.google.android.gms.maps.model.MarkerOptions;
+import com.google.android.gms.tasks.OnCompleteListener;
+import com.google.android.gms.tasks.Task;
+import com.google.firebase.FirebaseApp;
+import com.google.firebase.database.DatabaseReference;
+import com.google.firebase.messaging.FirebaseMessaging;
+import com.google.firebase.database.FirebaseDatabase;
+import com.google.firebase.firestore.FirebaseFirestore;
+
+
+import java.io.IOException;
+import java.util.List;
+import java.util.Locale;
+
+public class MainActivity extends AppCompatActivity implements OnMapReadyCallback {
+    private static final String FCM_URL = "https://fcm.googleapis.com/fcm/send";
+    private static final String SERVER_KEY = "BPGmTxSS_-obCrqebBRp5a8SNCbPEo2KPAtctovsmIU199fk8mS-NDcFdzS9AjzBOSEMZQoRzYOlrRQAy4y5eCQ";
+    private static final String ADMIN_TOPIC = "/topics/admin_alerts";
+
+    private static final int LOCATION_PERMISSION_CODE = 1;
+    private GoogleMap mMap;
+    private SearchView mapSearchView;
+    private Button locationButton;
+    private Location currentLocation;
+    private FusedLocationProviderClient fusedLocationProviderClient;
+    private Marker clickedMarker;
+    private LocationCallback locationCallback;
+    private FirebaseFirestore db = FirebaseFirestore.getInstance();
+    private DatabaseReference alertRef;
+
+    @SuppressLint("MissingInflatedId")
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
+
+        mapSearchView = findViewById(R.id.search_view);
+        locationButton = findViewById(R.id.btn_get_location);
+        Button move = findViewById(R.id.btn_track);
+        Button alertButton = findViewById(R.id.btn_alert);
+
+        FirebaseApp.initializeApp(this);
+        db = FirebaseFirestore.getInstance();
+        alertRef = FirebaseDatabase.getInstance().getReference("accident_locations");
+
+        FirebaseDatabase database = FirebaseDatabase.getInstance();
+        DatabaseReference myRef = database.getReference("message");
+
+
+        move.setOnClickListener(v -> {
+            Intent intent = new Intent(MainActivity.this, SecondActivity.class);
+            startActivity(intent);
+        });
+
+        fusedLocationProviderClient = LocationServices.getFusedLocationProviderClient(this);
+
+        alertButton.setOnClickListener(v -> {
+            sendUserAlert();
+            if (currentLocation != null) {
+                double latitude = currentLocation.getLatitude();
+                double longitude = currentLocation.getLongitude();
+                storeLocationInRealtimeDatabase(latitude, longitude);
+                sendAlertToAdmin(latitude, longitude);
+                Toast.makeText(MainActivity.this, "Your location has been sent to the admin.", Toast.LENGTH_SHORT).show();
+            } else {
+                Toast.makeText(MainActivity.this, "Unable to get location. Please try again.", Toast.LENGTH_SHORT).show();
+            }
+        });
+
+        Map<String, Object> user = new HashMap<>();
+        user.put("first", "Ada");
+        user.put("last", "Lovelace");
+        user.put("born", 1815);
+
+        // Add a new document with a generated ID
+        //DocumentReference db = null;
+        db.collection("users")
+                .add(user)
+                .addOnSuccessListener(documentReference -> {
+                    Log.d("Firebase", "DocumentSnapshot added with ID: " + documentReference.getId());
+                })
+                .addOnFailureListener(e -> {
+                    Log.w("Firebase", "Error adding document", e);
+                });
+
+
+        getFCMToken();
+
+        // Check if GPS is enabled
+        if (!isGPSEnabled()) {
+            showGPSAlert();
+        } else {
+            requestLocationUpdates();
+        }
+
+        SupportMapFragment mapFragment = (SupportMapFragment) getSupportFragmentManager()
+                .findFragmentById(R.id.map);
+
+        if (mapFragment != null) {
+            mapFragment.getMapAsync(this);
+            locationButton.setOnClickListener(v -> getLastLocation());
+        }
+
+        mapSearchView.setOnQueryTextListener(new SearchView.OnQueryTextListener() {
+            @Override
+            public boolean onQueryTextSubmit(String query) {
+                searchLocation(query);
+                return false;
+            }
+
+            @Override
+            public boolean onQueryTextChange(String newText) {
+                return false;
+            }
+        });
+
+        locationButton.setOnClickListener(v -> getLastLocation());
+    }
+    private void storeLocationInRealtimeDatabase(double latitude, double longitude) {
+        String alertId = alertRef.push().getKey();
+        Map<String, Object> locationData = new HashMap<>();
+        locationData.put("latitude", latitude);
+        locationData.put("longitude", longitude);
+        locationData.put("Nearest_hospital","");
+        locationData.put("Assign",false);
+        if (alertId != null) alertRef.child(alertId).setValue(locationData);
+    }
+
+    private boolean isGPSEnabled() {
+        LocationManager locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
+        return locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER);
+    }
+
+    private void showGPSAlert() {
+        new AlertDialog.Builder(this)
+                .setTitle("Enable GPS")
+                .setMessage("GPS is required for this feature. Enable it in settings.")
+                .setPositiveButton("Settings", (dialog, which) -> {
+                    Intent intent = new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS);
+                    startActivity(intent);
+                })
+                .setNegativeButton("Cancel", (dialog, which) -> dialog.dismiss())
+                .show();
+    }
+
+    private void requestLocationUpdates() {
+        if (ActivityCompat.checkSelfPermission(this, ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED
+                && ActivityCompat.checkSelfPermission(this, ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(this, new String[]{ACCESS_FINE_LOCATION, ACCESS_COARSE_LOCATION}, LOCATION_PERMISSION_CODE);
+            return;
+        }
+
+        LocationRequest locationRequest = LocationRequest.create();
+        locationRequest.setInterval(5000);
+        locationRequest.setFastestInterval(2000);
+        locationRequest.setPriority(LocationRequest.PRIORITY_HIGH_ACCURACY);
+
+        locationCallback = new LocationCallback() {
+            @Override
+            public void onLocationResult(LocationResult locationResult) {
+                if (locationResult == null) return;
+                for (Location location : locationResult.getLocations()) {
+                    currentLocation = location;
+                    updateMapWithLocation();
+                }
+            }
+        };
+
+        fusedLocationProviderClient.requestLocationUpdates(locationRequest, locationCallback, null);
+    }
+
+    private void getLastLocation() {
+        if (ActivityCompat.checkSelfPermission(this, ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(this, new String[]{ACCESS_FINE_LOCATION}, LOCATION_PERMISSION_CODE);
+            return;
+        }
+
+        Task<Location> task = fusedLocationProviderClient.getLastLocation();
+        task.addOnSuccessListener(location -> {
+            if (location != null) {
+                currentLocation = location;
+                updateMapWithLocation();
+            } else {
+                Toast.makeText(MainActivity.this, "Unable to get location", Toast.LENGTH_SHORT).show();
+            }
+        });
+    }
+
+    private boolean isSearching = false; // Add this flag
+    private boolean isCameraManuallyMoved = false;
+    @Override
+    public void onMapReady(GoogleMap googleMap) {
+        mMap = googleMap;
+
+        mMap.setOnCameraMoveStartedListener(reason -> {
+            if (reason == GoogleMap.OnCameraMoveStartedListener.REASON_GESTURE) {
+                isCameraManuallyMoved = true;
+            }
+        });
+
+        mMap.setOnMapClickListener(latLng -> {
+            if (mMap == null) return;
+
+            runOnUiThread(() -> {
+                if (clickedMarker != null) {
+                    clickedMarker.remove();
+                }
+                clickedMarker = mMap.addMarker(new MarkerOptions()
+                        .position(latLng)
+                        .title("Selected Location"));
+
+                Toast.makeText(MainActivity.this,
+                        "Clicked Location: " + latLng.latitude + ", " + latLng.longitude,
+                        Toast.LENGTH_SHORT).show();
+            });
+        });
+
+        updateMapWithLocation();
+    }
+    private void updateMapWithLocation() {
+        if (mMap != null && currentLocation != null && !isSearching) {
+            LatLng userLocation = new LatLng(currentLocation.getLatitude(), currentLocation.getLongitude());
+
+            // Preserve the zoom level
+            float currentZoom = mMap.getCameraPosition().zoom;
+            if (currentZoom < 10) currentZoom = 15;
+
+            mMap.clear();
+            mMap.addMarker(new MarkerOptions().position(userLocation).title("My Location"));
+
+            // **Only update camera if the user has NOT manually moved it**
+            if (!isCameraManuallyMoved) {
+                mMap.moveCamera(CameraUpdateFactory.newLatLngZoom(userLocation, currentZoom));
+            }
+
+            // Send the alert to admin (with the current location)
+            sendAlertToAdmin(currentLocation.getLatitude(), currentLocation.getLongitude());
+        }
+    }
+
+
+
+    private void searchLocation(String locationName) {
+        isSearching = true;
+        try {
+            List<android.location.Address> addresses = new android.location.Geocoder(this, Locale.getDefault())
+                    .getFromLocationName(locationName, 1);
+            if (addresses != null && !addresses.isEmpty()) {
+                android.location.Address address = addresses.get(0);
+                LatLng searchedLocation = new LatLng(address.getLatitude(), address.getLongitude());
+
+                // **Update currentLocation to prevent resetting to the previous location**
+                currentLocation = new Location("");
+                currentLocation.setLatitude(address.getLatitude());
+                currentLocation.setLongitude(address.getLongitude());
+
+                if (mMap != null) {
+                    mMap.clear();
+                    mMap.addMarker(new MarkerOptions().position(searchedLocation).title(locationName));
+                    mMap.moveCamera(CameraUpdateFactory.newLatLngZoom(searchedLocation, 12));
+                }
+            } else {
+                Toast.makeText(this, "Location not found!", Toast.LENGTH_SHORT).show();
+            }
+        } catch (IOException e) {
+            Toast.makeText(this, "Error finding location!", Toast.LENGTH_SHORT).show();
+        }
+        locationButton.setOnClickListener(v -> {
+            isSearching = false;
+            getLastLocation();
+        });
+
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == LOCATION_PERMISSION_CODE) {
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                requestLocationUpdates();
+            } else {
+                Toast.makeText(this, "Location permission denied. Enable it in settings.", Toast.LENGTH_SHORT).show();
+            }
+        }
+    }
+    private void sendAlertToAdmin(double latitude, double longitude) {
+        JSONObject notification = new JSONObject();
+        JSONObject data = new JSONObject();
+        try {
+            data.put("latitude", latitude);
+            data.put("longitude", longitude);
+            notification.put("to", ADMIN_TOPIC);
+            notification.put("data", data);
+            sendFCMNotification(notification);
+        } catch (JSONException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void sendFCMNotification(JSONObject notification) {
+        JsonObjectRequest jsonObjectRequest = new JsonObjectRequest(Request.Method.POST, FCM_URL, notification,
+                response -> Log.d("FCM", "Notification sent successfully"),
+                error -> Log.e("FCM", "Error sending notification", error)) {
+            @Override
+            public Map<String, String> getHeaders() {
+                Map<String, String> headers = new HashMap<>();
+                headers.put("Authorization", "BPGmTxSS_-obCrqebBRp5a8SNCbPEo2KPAtctovsmIU199fk8mS-NDcFdzS9AjzBOSEMZQoRzYOlrRQAy4y5eCQ" + SERVER_KEY);
+                headers.put("Content-Type", "application/json");
+                return headers;
+            }
+        };
+        RequestQueue requestQueue = Volley.newRequestQueue(this);
+        requestQueue.add(jsonObjectRequest);
+    }
+
+    public void getFCMToken() {
+        FirebaseMessaging.getInstance().getToken()
+                .addOnCompleteListener(task -> {
+                    if (!task.isSuccessful()) {
+                        Log.w("FCM", "Fetching FCM registration token failed", task.getException());
+                        return;
+                    }
+                    String token = task.getResult();
+                    Log.d("FCM", "User Token: " + token);
+                });
+    }
+    private void sendUserAlert() {
+        String userId = Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID);
+        if (currentLocation != null) {
+            DatabaseReference userAlertRef = FirebaseDatabase.getInstance().getReference("user_alerts");
+
+            userAlertRef.child(userId).setValue(new UserLocation(
+                    currentLocation.getLatitude(),
+                    currentLocation.getLongitude()
+            )).addOnSuccessListener(aVoid -> {
+                Toast.makeText(this, "Alert sent!", Toast.LENGTH_SHORT).show();
+
+                // Create notification JSON and send it
+                try {
+                    JSONObject notification = new JSONObject();
+                    JSONObject notificationBody = new JSONObject();
+
+                    notificationBody.put("title", "Emergency Alert!");
+                    notificationBody.put("body", "User needs help at location: " + currentLocation.getLatitude() + ", " + currentLocation.getLongitude());
+
+                    notification.put("to", "/topics/admins");
+                    notification.put("notification", notificationBody);
+                    notification.put("data", notificationBody);
+
+                    sendFCMNotification(notification);
+
+                } catch (Exception e) {
+                    Log.e("FCM", "Error creating notification JSON", e);
+                }
+            }).addOnFailureListener(e -> {
+                Toast.makeText(this, "Failed to send alert", Toast.LENGTH_SHORT).show();
+            });
+        }
+    }
+}
